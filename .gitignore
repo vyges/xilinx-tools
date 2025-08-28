@@ -1,0 +1,16 @@
+# Ignore all files in these directories, but keep the directories and .gitkeep files
+logs/*
+!logs/.gitkeep
+
+exports/*
+!exports/.gitkeep
+
+vivado-installer/*
+!vivado-installer/.gitkeep
+
+# Legacy patterns (kept for backward compatibility)
+vivado-installer/Xilinx_Unified_*.tar.gz
+vivado-installer/Xilinx_Vivado_Vitis_Update_*.tar.gz
+vivado-installer/FPGAs_AdaptiveSoCs_Unified_*.tar*
+vivado-installer/Vivado_Vitis_Update_*.tar.gz
+vivado-installer/FPGAs_AdaptiveSoCs_Unified_*Lin64.bin
