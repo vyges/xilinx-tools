@@ -9,7 +9,7 @@ set -e
 IMAGE_NAME="vyges-vivado"
 BASE_IMAGE="ubuntu:24.04"
 BUILDER_NAME="vyges-builder"
-CACHE_DIR="/tmp/.buildx-cache"
+CACHE_DIR="$HOME/.docker/buildx-cache"
 LOG_FILE="logs/build-$(date +%Y%m%d-%H%M%S).log"
 
 # Colors for output
@@ -76,62 +76,138 @@ estimate_build_time() {
     local ram_gb=$(free -g | grep '^Mem:' | awk '{print $2}')
     local storage_gb=$(df -BG / | tail -1 | awk '{print $4}' | sed 's/G//')
     
-    echo "=== BUILD TIME ESTIMATION ==="
+    echo "=== DOCKER BUILD TIME ESTIMATION ==="
     echo "Based on your system specifications:"
     echo "- CPU Cores: $cpu_cores"
     echo "- RAM: ${ram_gb}GB"
     echo "- Available Storage: ${storage_gb}GB"
     echo ""
     
-    # Base estimates (in minutes)
-    local base_time=180  # 3 hours base
+    # Docker build time estimation (more realistic)
+    echo "=== DOCKER BUILD BREAKDOWN ==="
     
-    # Adjustments based on specs
-    if [ "$cpu_cores" -ge 32 ]; then
-        local cpu_factor=0.7
-        echo "- High CPU count detected: ~30% faster build"
+    # Base Docker build times for Vivado (in minutes)
+    local base_vivado_time=45      # Vivado installation
+    local base_docker_time=120     # Docker layer processing
+    local base_cache_time=30       # Cache operations
+    local base_finalize_time=45    # Image finalization
+    
+    local total_base_minutes=$((base_vivado_time + base_docker_time + base_cache_time + base_finalize_time))
+    
+    echo "- Base Vivado installation: ${base_vivado_time} minutes"
+    echo "- Docker layer processing: ${base_docker_time} minutes"
+    echo "- Cache operations: ${base_cache_time} minutes"
+    echo "- Image finalization: ${base_finalize_time} minutes"
+    echo "- Total base time: ${total_base_minutes} minutes"
+    echo ""
+    
+    # System-specific adjustments
+    echo "=== SYSTEM OPTIMIZATIONS ==="
+    
+    # CPU adjustments (Docker builds are I/O bound, but CPU helps with parallel operations)
+    local cpu_factor=1.0
+    if [ "$cpu_cores" -ge 64 ]; then
+        cpu_factor=0.85
+        echo "- Very high CPU count (${cpu_cores} cores): ~15% faster (parallel operations)"
+    elif [ "$cpu_cores" -ge 32 ]; then
+        cpu_factor=0.90
+        echo "- High CPU count (${cpu_cores} cores): ~10% faster (parallel operations)"
     elif [ "$cpu_cores" -ge 16 ]; then
-        local cpu_factor=0.8
-        echo "- Good CPU count: ~20% faster build"
+        cpu_factor=0.95
+        echo "- Good CPU count (${cpu_cores} cores): ~5% faster (parallel operations)"
     elif [ "$cpu_cores" -ge 8 ]; then
-        local cpu_factor=0.9
-        echo "- Moderate CPU count: ~10% faster build"
+        cpu_factor=1.0
+        echo "- Adequate CPU count (${cpu_cores} cores): normal build speed"
     else
-        local cpu_factor=1.2
-        echo "- Low CPU count: ~20% slower build"
+        cpu_factor=1.15
+        echo "- Low CPU count (${cpu_cores} cores): ~15% slower (limited parallelism)"
     fi
     
-    if [ "$ram_gb" -ge 64 ]; then
-        local ram_factor=0.8
-        echo "- High RAM: ~20% faster build"
+    # RAM adjustments (prevents swapping during large operations)
+    local ram_factor=1.0
+    if [ "$ram_gb" -ge 128 ]; then
+        ram_factor=0.90
+        echo "- Very high RAM (${ram_gb}GB): ~10% faster (no memory pressure)"
+    elif [ "$ram_gb" -ge 64 ]; then
+        ram_factor=0.95
+        echo "- High RAM (${ram_gb}GB): ~5% faster (no memory pressure)"
     elif [ "$ram_gb" -ge 32 ]; then
-        local ram_factor=0.9
-        echo "- Good RAM: ~10% faster build"
+        ram_factor=1.0
+        echo "- Good RAM (${ram_gb}GB): normal build speed"
     elif [ "$ram_gb" -ge 16 ]; then
-        local ram_factor=1.0
-        echo "- Adequate RAM: normal build speed"
+        ram_factor=1.10
+        echo "- Adequate RAM (${ram_gb}GB): ~10% slower (potential memory pressure)"
     else
-        local ram_factor=1.3
-        echo "- Low RAM: ~30% slower build (consider increasing swap)"
+        ram_factor=1.25
+        echo "- Low RAM (${ram_gb}GB): ~25% slower (likely swapping, consider increasing)"
     fi
     
-    if [ "$storage_gb" -ge 500 ]; then
-        local storage_factor=0.9
-        echo "- High storage: ~10% faster build"
+    # Storage adjustments (I/O performance is critical for Docker builds)
+    local storage_factor=1.0
+    if [ "$storage_gb" -ge 1000 ]; then
+        storage_factor=0.90
+        echo "- Very high storage (${storage_gb}GB): ~10% faster (excellent I/O performance)"
+    elif [ "$storage_gb" -ge 500 ]; then
+        storage_factor=0.95
+        echo "- High storage (${storage_gb}GB): ~5% faster (good I/O performance)"
     elif [ "$storage_gb" -ge 200 ]; then
-        local storage_factor=1.0
-        echo "- Adequate storage: normal build speed"
+        storage_factor=1.0
+        echo "- Adequate storage (${storage_gb}GB): normal build speed"
+    elif [ "$storage_gb" -ge 100 ]; then
+        storage_factor=1.15
+        echo "- Low storage (${storage_gb}GB): ~15% slower (I/O bottlenecks likely)"
     else
-        local storage_factor=1.2
-        echo "- Low storage: ~20% slower build"
+        storage_factor=1.30
+        echo "- Very low storage (${storage_gb}GB): ~30% slower (severe I/O bottlenecks)"
     fi
     
-    # Calculate estimated time
-    local estimated_minutes=$(echo "$base_time * $cpu_factor * $ram_factor * $storage_factor" | bc -l)
+    # Docker-specific factors
+    local docker_factor=1.0
+    if command -v docker > /dev/null 2>&1; then
+        local docker_version=$(docker --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [ ! -z "$docker_version" ]; then
+            local major_version=$(echo "$docker_version" | cut -d. -f1)
+            if [ "$major_version" -ge 25 ]; then
+                docker_factor=0.95
+                echo "- Modern Docker (${docker_version}): ~5% faster (improved build performance)"
+            elif [ "$major_version" -ge 20 ]; then
+                docker_factor=1.0
+                echo "- Recent Docker (${docker_version}): normal build speed"
+            else
+                docker_factor=1.10
+                echo "- Older Docker (${docker_version}): ~10% slower (consider upgrading)"
+            fi
+        fi
+    fi
+    
+    # Calculate final estimated time
+    local estimated_minutes=$(echo "$total_base_minutes * $cpu_factor * $ram_factor * $storage_factor * $docker_factor" | bc -l)
     local estimated_hours=$(echo "scale=1; $estimated_minutes / 60" | bc -l)
+    local estimated_hours_rounded=$(echo "scale=0; $estimated_minutes / 60 + 0.5" | bc -l)
     
     echo ""
+    echo "=== FINAL ESTIMATION ==="
     echo "ESTIMATED BUILD TIME: ${estimated_hours} hours (${estimated_minutes%.*} minutes)"
+    echo ""
+    
+    # Provide time ranges for user planning
+    local min_time=$(echo "$estimated_minutes * 0.8" | bc -l)
+    local max_time=$(echo "$estimated_minutes * 1.3" | bc -l)
+    local min_hours=$(echo "scale=1; $min_time / 60" | bc -l)
+    local max_hours=$(echo "scale=1; $max_time / 60" | bc -l)
+    
+    echo "EXPECTED RANGE: ${min_hours}-${max_hours} hours"
+    echo "  - Best case: ${min_hours} hours (everything optimal)"
+    echo "  - Worst case: ${max_hours} hours (if issues occur)"
+    echo ""
+    
+    # Additional considerations
+    echo "=== IMPORTANT NOTES ==="
+    echo "- First build: Use the full estimated time"
+    echo "- Subsequent builds: 30-60% faster (cached layers)"
+    echo "- Clean builds (--clean): Use full estimated time"
+    echo "- Network issues: Add 10-20% to estimates"
+    echo "- Monitor progress: Use './build.sh --monitor' in another terminal"
     echo "========================================"
 }
 
@@ -145,6 +221,78 @@ print_warning() {
 
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Function to show real-time resource monitoring
+show_resource_monitoring() {
+    echo "Real-time Resource Monitoring"
+    echo "============================"
+    echo "Press Ctrl+C to stop monitoring"
+    echo ""
+    
+    while true; do
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        local memory=$(free -h | grep '^Mem:' | awk '{print $3 "/" $2 " (" $3/$2*100 "%)"}')
+        local disk=$(df -h / | tail -1 | awk '{print $3 "/" $2 " (" $3/$2*100 "%)"}')
+        local cache_size=$(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')
+        local docker_images=$(docker images --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}" | wc -l)
+        local docker_containers=$(docker ps -a --format "table {{.Names}}\t{{.Status}}" | wc -l)
+        
+        clear
+        echo "Real-time Resource Monitoring - $timestamp"
+        echo "=========================================="
+        echo "Memory Usage: $memory"
+        echo "Disk Usage:   $disk"
+        echo "Cache Size:   $cache_size"
+        echo "Docker Images: $((docker_images - 1))"
+        echo "Docker Containers: $((docker_containers - 1))"
+        echo ""
+        echo "Press Ctrl+C to stop monitoring"
+        
+        sleep 5
+    done
+}
+
+# Function to show build progress (can be called from another terminal)
+show_build_progress() {
+    if [ -f "/tmp/build_current_step" ]; then
+        local current_step=$(cat /tmp/build_current_step)
+        if [ ! -z "$current_step" ]; then
+            local start_time=$(cat /tmp/build_step_start 2>/dev/null || echo $(date +%s))
+            local current_time=$(date +%s)
+            local elapsed=$((current_time - start_time))
+            local elapsed_str=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)))
+            
+            echo "Current Build Step: $current_step"
+            echo "Elapsed Time: $elapsed_str"
+            echo "Log File: $LOG_FILE"
+        else
+            echo "No active build step found"
+        fi
+    else
+        echo "No build in progress"
+    fi
+}
+
+# Function to monitor resources during build
+monitor_resources() {
+    local log_file="$1"
+    local interval=30  # Check every 30 seconds
+    
+    while true; do
+        if [ ! -f "/tmp/build_current_step" ]; then
+            break  # Build finished
+        fi
+        
+        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        local memory=$(free -h | grep '^Mem:' | awk '{print $3 "/" $2 " (" $3/$2*100 "%)"}')
+        local disk=$(df -h / | tail -1 | awk '{print $3 "/" $2 " (" $3/$2*100 "%)"}')
+        local cache_size=$(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')
+        
+        echo "[$timestamp] RESOURCE_MONITOR: Memory: $memory, Disk: $disk, Cache: $cache_size" >> "$log_file"
+        
+        sleep $interval
+    done
 }
 
 # Function to show usage
@@ -163,6 +311,7 @@ OPTIONS:
     -s, --no-save        Skip automatic image export
     -h, --help           Show this help message
     --progress           Show current build progress (use in another terminal)
+    --monitor            Show real-time resource monitoring
 
 EXAMPLES:
     # Standard build with caching
@@ -182,6 +331,9 @@ EXAMPLES:
 
     # Monitor build progress (in another terminal)
     $0 --progress
+
+    # Monitor resources in real-time (in another terminal)
+    $0 --monitor
 
     # View build logs
     tail -f logs/build-*.log
@@ -224,6 +376,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --progress)
             show_build_progress
+            exit 0
+            ;;
+        --monitor)
+            show_resource_monitoring
             exit 0
             ;;
         *)
@@ -338,6 +494,26 @@ setup_builder() {
     log_with_timestamp "Setting up cache directory: $CACHE_DIR"
     mkdir -p "$CACHE_DIR"
     
+    # Add cache debugging info
+    log_with_timestamp "Cache directory details:"
+    log_with_timestamp "- Path: $CACHE_DIR"
+    log_with_timestamp "- Owner: $(ls -ld "$CACHE_DIR" | awk '{print $3 ":" $4}')"
+    log_with_timestamp "- Permissions: $(ls -ld "$CACHE_DIR" | awk '{print $1}')"
+    log_with_timestamp "- Size: $(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')"
+    
+    # Check cache directory permissions
+    if [ ! -w "$CACHE_DIR" ]; then
+        print_warning "Cache directory is not writable by current user"
+        log_with_timestamp "Attempting to fix permissions..."
+        chmod 755 "$CACHE_DIR"
+    fi
+    
+    # Validate cache directory
+    if ! validate_cache "$CACHE_DIR" "$LOG_FILE"; then
+        print_error "Cache validation failed. Exiting."
+        exit 1
+    fi
+    
     log_build_step_complete "Setting Up Buildx Builder"
 }
 
@@ -346,6 +522,12 @@ build_image() {
     log_build_step "Building Docker Image"
     log_with_timestamp "Building image: $IMAGE_NAME"
     log_with_timestamp "Log file: $LOG_FILE"
+    
+    # Add cache status before build
+    log_with_timestamp "Cache status before build:"
+    log_with_timestamp "- Cache directory: $CACHE_DIR"
+    log_with_timestamp "- Cache size: $(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')"
+    log_with_timestamp "- Cache contents: $(ls -la "$CACHE_DIR" | wc -l) items"
     
     # Build command based on options
     if [ "$CLEAN_BUILD" = true ]; then
@@ -362,17 +544,29 @@ build_image() {
     else
         log_with_timestamp "Build with caching"
         if [ "$USE_BUILDX" = true ]; then
+            # Add verbose output for debugging
+            log_with_timestamp "Starting buildx build with cache..."
+            log_with_timestamp "Cache from: type=local,src=$CACHE_DIR"
+            log_with_timestamp "Cache to: type=local,dest=$CACHE_DIR"
+            
             docker buildx build \
                 --cache-from type=local,src="$CACHE_DIR" \
                 --cache-to type=local,dest="$CACHE_DIR" \
                 --platform linux/amd64 \
                 --load \
+                --progress=plain \
                 -t "$IMAGE_NAME" . 2>&1 | tee -a "$LOG_FILE"
         else
             docker build \
                 -t "$IMAGE_NAME" . 2>&1 | tee -a "$LOG_FILE"
         fi
     fi
+    
+    # Add cache status after build
+    log_with_timestamp "Cache status after build:"
+    log_with_timestamp "- Cache directory: $CACHE_DIR"
+    log_with_timestamp "- Cache size: $(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')"
+    log_with_timestamp "- Cache contents: $(ls -la "$CACHE_DIR" | wc -l) items"
     
     # Check build result
     if [ $? -eq 0 ]; then
@@ -418,28 +612,35 @@ cleanup() {
         rm -f "/tmp/build_step_start"
     fi
     
+    # Stop resource monitoring if running
+    if [ ! -z "$MONITOR_PID" ]; then
+        kill $MONITOR_PID 2>/dev/null || true
+    fi
+    
     log_with_timestamp "Cleanup completed"
 }
 
-# Function to show build progress (can be called from another terminal)
-show_build_progress() {
-    if [ -f "/tmp/build_current_step" ]; then
-        local current_step=$(cat /tmp/build_current_step)
-        if [ ! -z "$current_step" ]; then
-            local start_time=$(cat /tmp/build_step_start 2>/dev/null || echo $(date +%s))
-            local current_time=$(date +%s)
-            local elapsed=$((current_time - start_time))
-            local elapsed_str=$(printf "%02d:%02d:%02d" $((elapsed/3600)) $(((elapsed%3600)/60)) $((elapsed%60)))
-            
-            echo "Current Build Step: $current_step"
-            echo "Elapsed Time: $elapsed_str"
-            echo "Log File: $LOG_FILE"
-        else
-            echo "No active build step found"
-        fi
-    else
-        echo "No build in progress"
+# Function to validate cache directory
+validate_cache() {
+    local cache_dir="$1"
+    local log_file="$2"
+    
+    log_with_timestamp "Validating cache directory: $cache_dir"
+    
+    if [ ! -d "$cache_dir" ]; then
+        print_error "Cache directory does not exist: $cache_dir"
+        return 1
     fi
+    
+    if [ ! -w "$cache_dir" ]; then
+        print_error "Cache directory is not writable: $cache_dir"
+        return 1
+    fi
+    
+    local cache_size=$(du -sh "$cache_dir" 2>/dev/null || echo '0B')
+    log_with_timestamp "Cache validation passed: $cache_dir ($cache_size)"
+    
+    return 0
 }
 
 # Function to save Docker image
@@ -528,11 +729,20 @@ main() {
     # Set up error handling
     trap cleanup EXIT
     
+    # Start resource monitoring in background
+    monitor_resources "$LOG_FILE" &
+    MONITOR_PID=$!
+    
     # Execute build steps
     check_prerequisites
     check_base_image
     setup_builder
     build_image
+    
+    # Stop monitoring
+    if [ ! -z "$MONITOR_PID" ]; then
+        kill $MONITOR_PID 2>/dev/null || true
+    fi
     
     # Log build completion
     local end_time=$(date +%s)
