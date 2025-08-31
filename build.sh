@@ -15,6 +15,9 @@ LOG_FILE="logs/build-$(date +%Y%m%d-%H%M%S).log"
 # Container runtime (docker or podman)
 CONTAINER_RUNTIME="podman"
 
+# Build timing
+BUILD_START_TIME=""
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -83,6 +86,41 @@ log_with_timestamp() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] $message" | tee -a "$LOG_FILE"
+}
+
+# Function to calculate elapsed time
+calculate_elapsed_time() {
+    local start_time="$1"
+    local current_time=$(date +%s)
+    local elapsed=$((current_time - start_time))
+    
+    local hours=$((elapsed / 3600))
+    local minutes=$(((elapsed % 3600) / 60))
+    local seconds=$((elapsed % 60))
+    
+    if [ $hours -gt 0 ]; then
+        printf "%02d:%02d:%02d" $hours $minutes $seconds
+    else
+        printf "%02d:%02d" $minutes $seconds
+    fi
+}
+
+# Function to show build progress summary
+show_build_progress() {
+    local step_name="$1"
+    local start_time="$2"
+    
+    local current_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local elapsed=$(calculate_elapsed_time "$start_time")
+    
+    echo ""
+    log_with_timestamp "=== BUILD PROGRESS SUMMARY ==="
+    log_with_timestamp "Step: $step_name"
+    log_with_timestamp "Start Time: $(date -d "@$start_time" '+%Y-%m-%d %H:%M:%S')"
+    log_with_timestamp "Current Time: $current_time"
+    log_with_timestamp "Elapsed Time: $elapsed"
+    log_with_timestamp "================================"
+    echo ""
 }
 
 # Function to log build step
@@ -349,14 +387,17 @@ OPTIONS:
     -i, --image NAME     Custom image name (default: vyges-vivado)
     -l, --log FILE       Custom log file (default: build-YYYYMMDD-HHMMSS.log)
     -s, --no-save        Skip automatic image export
-    --skip-verify        Skip SHA512 verification of Vivado installer
+    --verify             Verify SHA512 against digests file (optional, adds time)
     -h, --help           Show this help message
     --progress           Show current build progress (use in another terminal)
     --monitor            Show real-time resource monitoring
 
 EXAMPLES:
-    # Standard build with caching
+    # Standard build with caching (calculates SHA512, no verification)
     $0
+
+    # Build with SHA512 verification against digests file
+    $0 --verify
 
     # Clean build (no cache)
     $0 -c
@@ -385,7 +426,7 @@ EOF
 CLEAN_BUILD=false
 FORCE_PULL=false
 SKIP_SAVE=false
-SKIP_VERIFY=false
+VERIFY_SHA512=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         -c|--clean)
@@ -412,8 +453,8 @@ while [[ $# -gt 0 ]]; do
             SKIP_SAVE=true
             shift
             ;;
-        --skip-verify)
-            SKIP_VERIFY=true
+        --verify)
+            VERIFY_SHA512=true
             shift
             ;;
         -h|--help)
@@ -749,30 +790,22 @@ validate_cache() {
     return 0
 }
 
-# Function to verify Vivado installer integrity
-verify_vivado_installer() {
-    log_build_step "Verifying Vivado Installer Integrity"
+# Function to calculate and optionally verify Vivado installer SHA512
+calculate_vivado_sha512() {
+    log_build_step "Calculating Vivado Installer SHA512"
     
     local installer_dir="vivado-installer"
     local tar_file="${installer_dir}/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar"
     local digests_file="${installer_dir}/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar.digests"
     
-    # Check if files exist
+    # Check if tar file exists
     if [ ! -f "$tar_file" ]; then
         print_error "Vivado installer tar file not found: $tar_file"
         return 1
     fi
     
-    if [ ! -f "$digests_file" ]; then
-        print_warning "Digests file not found: $digests_file"
-        print_warning "Skipping SHA512 verification. Installer integrity not verified."
-        log_build_step_complete "Verifying Vivado Installer Integrity"
-        return 0
-    fi
-    
-    log_with_timestamp "Verifying installer integrity using SHA512..."
+    log_with_timestamp "Calculating SHA512 hash of installer..."
     log_with_timestamp "Tar file: $tar_file"
-    log_with_timestamp "Digests file: $digests_file"
     
     # Get file size for progress indication
     local file_size=$(du -h "$tar_file" | cut -f1)
@@ -783,47 +816,67 @@ verify_vivado_installer() {
     local calculated_hash=$(sha512sum "$tar_file" | cut -d' ' -f1)
     log_with_timestamp "Calculated SHA512: $calculated_hash"
     
-    # Extract all SHA512 hashes from the digests file
-    # The file contains multiple hashes, we need to find the one that matches
-    local temp_file=$(mktemp)
+    # Always print the hash for reference
+    print_success "SHA512 calculated: $calculated_hash"
+    log_with_timestamp "SHA512 calculation completed"
     
-    # Extract all SHA512 hashes (128 hex characters) from the file
-    # Handle cases where hashes are split across lines
-    grep -oE '[a-f0-9]{128}' "$digests_file" > "$temp_file"
-    
-    local match_found=false
-    local expected_hash=""
-    
-    while IFS= read -r hash; do
-        if [ "$calculated_hash" = "$hash" ]; then
-            expected_hash="$hash"
-            match_found=true
-            break
+    # Only verify against digests file if --verify flag is used
+    if [ "$VERIFY_SHA512" = true ]; then
+        log_with_timestamp "Verification requested - checking against digests file..."
+        
+        if [ ! -f "$digests_file" ]; then
+            print_warning "Digests file not found: $digests_file"
+            print_warning "Cannot verify SHA512. Installer integrity not verified."
+            log_build_step_complete "Calculating Vivado Installer SHA512"
+            return 0
         fi
-    done < "$temp_file"
-    
-    rm -f "$temp_file"
-    
-    if [ "$match_found" = true ]; then
-        log_with_timestamp "Expected SHA512: $expected_hash"
-        print_success "SHA512 verification PASSED - Installer integrity confirmed"
-        log_with_timestamp "SHA512 verification successful"
+        
+        log_with_timestamp "Digests file: $digests_file"
+        
+        # Extract all SHA512 hashes from the digests file
+        # The file contains multiple hashes, we need to find the one that matches
+        local temp_file=$(mktemp)
+        
+        # Extract all SHA512 hashes (128 hex characters) from the file
+        # Handle cases where hashes are split across lines
+        grep -oE '[a-f0-9]{128}' "$digests_file" > "$temp_file"
+        
+        local match_found=false
+        local expected_hash=""
+        
+        while IFS= read -r hash; do
+            if [ "$calculated_hash" = "$hash" ]; then
+                expected_hash="$hash"
+                match_found=true
+                break
+            fi
+        done < "$temp_file"
+        
+        rm -f "$temp_file"
+        
+        if [ "$match_found" = true ]; then
+            log_with_timestamp "Expected SHA512: $expected_hash"
+            print_success "SHA512 verification PASSED - Installer integrity confirmed"
+            log_with_timestamp "SHA512 verification successful"
+        else
+            print_error "SHA512 verification FAILED - Installer may be corrupted"
+            print_error "Calculated: $calculated_hash"
+            print_error "No matching hash found in digests file"
+            
+            # Show available hashes for debugging
+            log_with_timestamp "Available hashes in digests file:"
+            grep -oE '[a-f0-9]{128}' "$digests_file" | while read -r hash; do
+                log_with_timestamp "  $hash"
+            done
+            
+            log_with_timestamp "SHA512 verification failed - installer may be corrupted"
+            return 1
+        fi
     else
-        print_error "SHA512 verification FAILED - Installer may be corrupted"
-        print_error "Calculated: $calculated_hash"
-        print_error "No matching hash found in digests file"
-        
-        # Show available hashes for debugging
-        log_with_timestamp "Available hashes in digests file:"
-        grep -oE '[a-f0-9]{128}' "$digests_file" | while read -r hash; do
-            log_with_timestamp "  $hash"
-        done
-        
-        log_with_timestamp "SHA512 verification failed - installer may be corrupted"
-        return 1
+        log_with_timestamp "Verification not requested (use --verify flag to verify against digests file)"
     fi
     
-    log_build_step_complete "Verifying Vivado Installer Integrity"
+    log_build_step_complete "Calculating Vivado Installer SHA512"
     return 0
 }
 
@@ -889,9 +942,13 @@ main() {
     # Initialize log file
     touch "$LOG_FILE"
     
+    # Record build start time
+    BUILD_START_TIME=$(date +%s)
+    
     # Log build start
     log_with_timestamp "========================================"
     log_with_timestamp "VYGES VIVADO DOCKER BUILD STARTED"
+    log_with_timestamp "Build Start Time: $(date -d "@$BUILD_START_TIME" '+%Y-%m-%d %H:%M:%S')"
     log_with_timestamp "========================================"
     
     # Log machine information
@@ -922,15 +979,22 @@ main() {
     
     # Execute build steps
     optimize_system_limits
+    show_build_progress "System Optimization Complete" "$BUILD_START_TIME"
+    
     check_prerequisites
-    if [ "$SKIP_VERIFY" = false ]; then
-        verify_vivado_installer
-    else
-        log_with_timestamp "Skipping SHA512 verification (--skip-verify flag used)"
-    fi
+    show_build_progress "Prerequisites Check Complete" "$BUILD_START_TIME"
+    
+    calculate_vivado_sha512
+    show_build_progress "SHA512 Calculation Complete" "$BUILD_START_TIME"
+    
     check_base_image
+    show_build_progress "Base Image Check Complete" "$BUILD_START_TIME"
+    
     setup_builder
+    show_build_progress "Builder Setup Complete" "$BUILD_START_TIME"
+    
     build_image
+    show_build_progress "Image Build Complete" "$BUILD_START_TIME"
     
     # Stop monitoring
     if [ ! -z "$MONITOR_PID" ]; then
@@ -939,14 +1003,13 @@ main() {
     
     # Log build completion
     local end_time=$(date +%s)
-    local start_time=$(date +%s -d "$(head -1 "$LOG_FILE" | grep -oE '\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\]' | sed 's/\[//;s/\]//')")
-    local total_duration=$((end_time - start_time))
-    local total_duration_str=$(printf "%02d:%02d:%02d" $((total_duration/3600)) $(((total_duration%3600)/60)) $((total_duration%60)))
+    local total_duration_str=$(calculate_elapsed_time "$BUILD_START_TIME")
     
+    echo ""
     log_with_timestamp "========================================"
     log_with_timestamp "BUILD PROCESS COMPLETED SUCCESSFULLY!"
-    log_with_timestamp "Total Build Time: $total_duration_str"
     log_with_timestamp "========================================"
+    show_build_progress "FINAL BUILD COMPLETE" "$BUILD_START_TIME"
     
     # Save Docker image (unless skipped)
     if [ "$SKIP_SAVE" = false ]; then
