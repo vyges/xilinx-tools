@@ -14,3 +14,4 @@ vivado-installer/Xilinx_Vivado_Vitis_Update_*.tar.gz
 vivado-installer/FPGAs_AdaptiveSoCs_Unified_*.tar*
 vivado-installer/Vivado_Vitis_Update_*.tar.gz
 vivado-installer/FPGAs_AdaptiveSoCs_Unified_*Lin64.bin
+test_digests.txt

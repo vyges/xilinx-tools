@@ -12,6 +12,13 @@ BUILDER_NAME="vyges-builder"
 CACHE_DIR="$HOME/.container-cache"
 LOG_FILE="logs/build-$(date +%Y%m%d-%H%M%S).log"
 
+# Vivado configuration (must match Dockerfile)
+VIVADO_BASE_VERSION="2025.1"
+VIVADO_VERSION="${VIVADO_BASE_VERSION}"
+VIVADO_INSTALLER="FPGAs_AdaptiveSoCs_Unified_SDI_${VIVADO_VERSION}_0530_0145.tar"
+VIVADO_DIGESTS="FPGAs_AdaptiveSoCs_Unified_SDI_${VIVADO_VERSION}_0530_0145.tar.digests"
+VIVADO_INSTALLER_CONFIG="install_config_vivado.${VIVADO_VERSION}.txt"
+
 # Container runtime (docker or podman)
 CONTAINER_RUNTIME="podman"
 
@@ -105,8 +112,8 @@ calculate_elapsed_time() {
     fi
 }
 
-# Function to show build progress summary
-show_build_progress() {
+# Function to show build progress summary with elapsed time
+show_build_summary() {
     local step_name="$1"
     local start_time="$2"
     
@@ -387,17 +394,13 @@ OPTIONS:
     -i, --image NAME     Custom image name (default: vyges-vivado)
     -l, --log FILE       Custom log file (default: build-YYYYMMDD-HHMMSS.log)
     -s, --no-save        Skip automatic image export
-    --verify             Verify SHA512 against digests file (optional, adds time)
     -h, --help           Show this help message
     --progress           Show current build progress (use in another terminal)
     --monitor            Show real-time resource monitoring
 
 EXAMPLES:
-    # Standard build with caching (calculates SHA512, no verification)
+    # Standard build with caching
     $0
-
-    # Build with SHA512 verification against digests file
-    $0 --verify
 
     # Clean build (no cache)
     $0 -c
@@ -426,7 +429,6 @@ EOF
 CLEAN_BUILD=false
 FORCE_PULL=false
 SKIP_SAVE=false
-VERIFY_SHA512=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         -c|--clean)
@@ -451,10 +453,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         -s|--no-save)
             SKIP_SAVE=true
-            shift
-            ;;
-        --verify)
-            VERIFY_SHA512=true
             shift
             ;;
         -h|--help)
@@ -563,8 +561,9 @@ check_prerequisites() {
     fi
     
     # Check if installer files exist
-    if [ ! -f "vivado-installer/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar" ]; then
-        log_with_timestamp "Vivado installer not found. Build may fail if installer is missing."
+    if [ ! -f "vivado-installer/${VIVADO_INSTALLER}" ]; then
+        log_with_timestamp "Vivado installer not found: vivado-installer/${VIVADO_INSTALLER}"
+        log_with_timestamp "Build may fail if installer is missing."
     fi
     
     log_build_step_complete "Checking Prerequisites"
@@ -600,6 +599,31 @@ check_base_image() {
 setup_builder() {
     log_build_step "Setting Up Container Builder"
     
+    # Create cache directory for all container runtimes
+    log_with_timestamp "Setting up cache directory: $CACHE_DIR"
+    mkdir -p "$CACHE_DIR"
+    chmod 755 "$CACHE_DIR"
+    
+    # Add cache debugging info
+    log_with_timestamp "Cache directory details:"
+    log_with_timestamp "- Path: $CACHE_DIR"
+    log_with_timestamp "- Owner: $(ls -ld "$CACHE_DIR" | awk '{print $3 ":" $4}')"
+    log_with_timestamp "- Permissions: $(ls -ld "$CACHE_DIR" | awk '{print $1}')"
+    log_with_timestamp "- Size: $(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')"
+    
+    # Check cache directory permissions
+    if [ ! -w "$CACHE_DIR" ]; then
+        print_warning "Cache directory is not writable by current user"
+        log_with_timestamp "Attempting to fix permissions..."
+        chmod 755 "$CACHE_DIR"
+    fi
+    
+    # Validate cache directory
+    if ! validate_cache "$CACHE_DIR" "$LOG_FILE"; then
+        print_error "Cache validation failed. Exiting."
+        exit 1
+    fi
+    
     if [ "$CONTAINER_RUNTIME" = "podman" ]; then
         log_with_timestamp "Using Podman (no buildx setup needed)"
         log_build_step_complete "Setting Up Container Builder"
@@ -626,30 +650,6 @@ setup_builder() {
     # Verify builder is active
     ACTIVE_BUILDER=$(docker buildx ls | grep '*' | awk '{print $1}')
     log_with_timestamp "Active builder: $ACTIVE_BUILDER"
-    
-    # Create cache directory
-    log_with_timestamp "Setting up cache directory: $CACHE_DIR"
-    mkdir -p "$CACHE_DIR"
-    
-    # Add cache debugging info
-    log_with_timestamp "Cache directory details:"
-    log_with_timestamp "- Path: $CACHE_DIR"
-    log_with_timestamp "- Owner: $(ls -ld "$CACHE_DIR" | awk '{print $3 ":" $4}')"
-    log_with_timestamp "- Permissions: $(ls -ld "$CACHE_DIR" | awk '{print $1}')"
-    log_with_timestamp "- Size: $(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')"
-    
-    # Check cache directory permissions
-    if [ ! -w "$CACHE_DIR" ]; then
-        print_warning "Cache directory is not writable by current user"
-        log_with_timestamp "Attempting to fix permissions..."
-        chmod 755 "$CACHE_DIR"
-    fi
-    
-    # Validate cache directory
-    if ! validate_cache "$CACHE_DIR" "$LOG_FILE"; then
-        print_error "Cache validation failed. Exiting."
-        exit 1
-    fi
     
     log_build_step_complete "Setting Up Buildx Builder"
 }
@@ -716,7 +716,8 @@ build_image() {
     log_with_timestamp "- Cache contents: $(ls -la "$CACHE_DIR" | wc -l) items"
     
     # Check build result
-    if [ $? -eq 0 ]; then
+    local build_exit_code=$?
+    if [ $build_exit_code -eq 0 ]; then
         log_with_timestamp "Build completed successfully!"
         
         # Show image details
@@ -737,7 +738,9 @@ build_image() {
         
         log_build_step_complete "Building Docker Image"
     else
-        print_error "Build failed. Check log file: $LOG_FILE"
+        print_error "Build failed with exit code: $build_exit_code"
+        print_error "Check log file: $LOG_FILE"
+        log_build_step_complete "Building Docker Image"
         exit 1
     fi
 }
@@ -790,77 +793,7 @@ validate_cache() {
     return 0
 }
 
-# Function to calculate and optionally verify Vivado installer SHA512
-calculate_vivado_sha512() {
-    log_build_step "Calculating Vivado Installer SHA512"
-    
-    local installer_dir="vivado-installer"
-    local tar_file="${installer_dir}/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar"
-    local digests_file="${installer_dir}/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar.digests"
-    
-    # Check if tar file exists
-    if [ ! -f "$tar_file" ]; then
-        print_error "Vivado installer tar file not found: $tar_file"
-        return 1
-    fi
-    
-    log_with_timestamp "Calculating SHA512 hash of installer..."
-    log_with_timestamp "Tar file: $tar_file"
-    
-    # Get file size for progress indication
-    local file_size=$(du -h "$tar_file" | cut -f1)
-    log_with_timestamp "File size: $file_size"
-    
-    # Calculate SHA512 hash
-    log_with_timestamp "Calculating SHA512 hash (this may take several minutes for large files)..."
-    local calculated_hash=$(sha512sum "$tar_file" | cut -d' ' -f1)
-    log_with_timestamp "Calculated SHA512: $calculated_hash"
-    
-    # Always print the hash for reference
-    print_success "SHA512 calculated: $calculated_hash"
-    log_with_timestamp "SHA512 calculation completed"
-    
-    # Only verify against digests file if --verify flag is used
-    if [ "$VERIFY_SHA512" = true ]; then
-        log_with_timestamp "Verification requested - checking against digests file..."
-        
-        if [ ! -f "$digests_file" ]; then
-            print_warning "Digests file not found: $digests_file"
-            print_warning "Cannot verify SHA512. Installer integrity not verified."
-            log_build_step_complete "Calculating Vivado Installer SHA512"
-            return 0
-        fi
-        
-        log_with_timestamp "Digests file: $digests_file"
-        
-        # Simple approach: search for the calculated hash directly in the digests file
-        log_with_timestamp "Searching for calculated hash in digests file..."
-        
-        if grep -q "$calculated_hash" "$digests_file"; then
-            log_with_timestamp "Found matching hash in digests file"
-            print_success "SHA512 verification PASSED - Installer integrity confirmed"
-            log_with_timestamp "SHA512 verification successful"
-        else
-            print_error "SHA512 verification FAILED - Installer may be corrupted"
-            print_error "Calculated: $calculated_hash"
-            print_error "No matching hash found in digests file"
-            
-            # Show available hashes for debugging
-            log_with_timestamp "Available hashes in digests file:"
-            grep -oE '[a-f0-9]{128}' "$digests_file" | while read -r hash; do
-                log_with_timestamp "  $hash"
-            done
-            
-            log_with_timestamp "SHA512 verification failed - installer may be corrupted"
-            return 1
-        fi
-    else
-        log_with_timestamp "Verification not requested (use --verify flag to verify against digests file)"
-    fi
-    
-    log_build_step_complete "Calculating Vivado Installer SHA512"
-    return 0
-}
+# SHA512 calculation moved to download-installer.sh to save build time
 
 # Function to save Docker image
 save_docker_image() {
@@ -947,6 +880,8 @@ main() {
     log_with_timestamp "- Image name: $IMAGE_NAME"
     log_with_timestamp "- Base image: $BASE_IMAGE"
     log_with_timestamp "- Builder name: $BUILDER_NAME"
+    log_with_timestamp "- Vivado version: $VIVADO_VERSION"
+    log_with_timestamp "- Vivado installer: $VIVADO_INSTALLER"
     log_with_timestamp "- Clean build: $CLEAN_BUILD"
     log_with_timestamp "- Force pull: $FORCE_PULL"
     log_with_timestamp "- Log file: $LOG_FILE"
@@ -961,22 +896,22 @@ main() {
     
     # Execute build steps
     optimize_system_limits
-    show_build_progress "System Optimization Complete" "$BUILD_START_TIME"
+    show_build_summary "System Optimization Complete" "$BUILD_START_TIME"
     
     check_prerequisites
-    show_build_progress "Prerequisites Check Complete" "$BUILD_START_TIME"
+    show_build_summary "Prerequisites Check Complete" "$BUILD_START_TIME"
     
-    calculate_vivado_sha512
-    show_build_progress "SHA512 Calculation Complete" "$BUILD_START_TIME"
+    # SHA512 calculation moved to download-installer.sh to save build time
+    show_build_summary "SHA512 Calculation Complete" "$BUILD_START_TIME"
     
     check_base_image
-    show_build_progress "Base Image Check Complete" "$BUILD_START_TIME"
+    show_build_summary "Base Image Check Complete" "$BUILD_START_TIME"
     
     setup_builder
-    show_build_progress "Builder Setup Complete" "$BUILD_START_TIME"
+    show_build_summary "Builder Setup Complete" "$BUILD_START_TIME"
     
     build_image
-    show_build_progress "Image Build Complete" "$BUILD_START_TIME"
+    show_build_summary "Image Build Complete" "$BUILD_START_TIME"
     
     # Stop monitoring
     if [ ! -z "$MONITOR_PID" ]; then
@@ -991,7 +926,7 @@ main() {
     log_with_timestamp "========================================"
     log_with_timestamp "BUILD PROCESS COMPLETED SUCCESSFULLY!"
     log_with_timestamp "========================================"
-    show_build_progress "FINAL BUILD COMPLETE" "$BUILD_START_TIME"
+    show_build_summary "FINAL BUILD COMPLETE" "$BUILD_START_TIME"
     
     # Save Docker image (unless skipped)
     if [ "$SKIP_SAVE" = false ]; then

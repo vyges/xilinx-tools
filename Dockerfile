@@ -75,17 +75,19 @@ RUN \
     echo "Error: Installer not found. Please run download-installer.sh first." ; \
     exit 1 ; \
   fi && \
-  tar xf /vivado-installer/$VIVADO_INSTALLER --strip-components=1 -C /vivado-installer/install && \
+  tar xf /vivado-installer/$VIVADO_INSTALLER --strip-components=1 --no-same-owner -C /vivado-installer/install && \
   if [ ! -e ${VIVADO_INSTALLER_CONFIG} ] ; then \
+    echo "No installer configuration file found. Generating default config..." && \
     /vivado-installer/install/xsetup \
       -p 'Vivado' \
       -e 'Vivado ML Enterprise' \
       -b ConfigGen && \
-    echo "No installer configuration file was provided. Generating a default one for you to modify." && \
+    echo "Generated default configuration:" && \
     echo "-------------" && \
     cat /root/.Xilinx/install_config.txt && \
     echo "-------------" && \
-    exit 1 ; \
+    echo "Using generated configuration for installation..." && \
+    VIVADO_INSTALLER_CONFIG="/root/.Xilinx/install_config.txt" ; \
   fi && \
   /vivado-installer/install/xsetup \
     --agree 3rdPartyEULA,XilinxEULA \
@@ -101,7 +103,7 @@ RUN \
       echo "Error: Update file not found. Please run download-installer.sh first." ; \
       exit 1 ; \
     fi && \
-    tar xf /vivado-installer/$VIVADO_UPDATE --strip-components=1 -C /vivado-installer/update && \
+    tar xf /vivado-installer/$VIVADO_UPDATE --strip-components=1 --no-same-owner -C /vivado-installer/update && \
     /vivado-installer/update/xsetup \
       --agree 3rdPartyEULA,XilinxEULA \
       --batch Update \
