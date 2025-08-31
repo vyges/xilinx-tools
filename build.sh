@@ -833,29 +833,11 @@ calculate_vivado_sha512() {
         
         log_with_timestamp "Digests file: $digests_file"
         
-        # Extract all SHA512 hashes from the digests file
-        # The file contains multiple hashes, we need to find the one that matches
-        local temp_file=$(mktemp)
+        # Simple approach: search for the calculated hash directly in the digests file
+        log_with_timestamp "Searching for calculated hash in digests file..."
         
-        # Extract all SHA512 hashes (128 hex characters) from the file
-        # Handle cases where hashes are split across lines
-        grep -oE '[a-f0-9]{128}' "$digests_file" > "$temp_file"
-        
-        local match_found=false
-        local expected_hash=""
-        
-        while IFS= read -r hash; do
-            if [ "$calculated_hash" = "$hash" ]; then
-                expected_hash="$hash"
-                match_found=true
-                break
-            fi
-        done < "$temp_file"
-        
-        rm -f "$temp_file"
-        
-        if [ "$match_found" = true ]; then
-            log_with_timestamp "Expected SHA512: $expected_hash"
+        if grep -q "$calculated_hash" "$digests_file"; then
+            log_with_timestamp "Found matching hash in digests file"
             print_success "SHA512 verification PASSED - Installer integrity confirmed"
             log_with_timestamp "SHA512 verification successful"
         else
