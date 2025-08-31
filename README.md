@@ -78,6 +78,15 @@ This **GitHub template repository** provides a complete Docker configuration for
 - **Server machine that does not sleep or suspend** (required for 3.5+ hour builds)
 - **Proper system limits configured** (see System Limits section below)
 
+### **Runtime System Requirements**
+
+**For Running the Container (after build):**
+- **RAM**: 64GB+ minimum, 128GB+ recommended (184GB image requires significant memory)
+- **CPU**: 8+ cores recommended (container loading and Vivado operations are CPU-intensive)
+- **Storage**: NVMe SSD required (HDD will cause severe performance issues)
+- **Available Space**: 100-200GB for container runtime and temporary files
+- **Startup Time**: 15-30+ minutes to load the 184GB image (even with 384GB RAM)
+
 ### **Container Runtime Requirements**
 - **Docker**: Minimum 20.10+, Recommended 24.0+, Current 28.3.3 with Buildx v0.26.1
 - **Podman**: Minimum 4.0+, Recommended 4.9+ (✅ Successfully tested with Podman 4.9.3)
@@ -289,9 +298,10 @@ The Docker build process requires significant disk space due to multiple stages:
 5. **Final Image**: ~120-150GB (compressed Docker image)
 
 ### **Total Space Requirements**
-- **Minimum Free Space**: 300GB
-- **Recommended Free Space**: 400GB
+- **Minimum Free Space**: 300GB (build only)
+- **Recommended Free Space**: 500GB (build + runtime)
 - **Peak Usage During Build**: ~250GB
+- **Runtime Requirements**: Additional 50-100GB for container operations
 
 ### **Space Recovery After Build**
 - **Vivado Installer**: Can be deleted after successful build
@@ -710,8 +720,14 @@ docker build --no-cache -t vyges-vivado . > build.log 2>&1 && \
 
 ### 3. Run Container
 
+**⚠️ Resource Requirements for Running Container:**
+- **RAM**: 64GB+ minimum, 128GB+ recommended (184GB image requires massive memory)
+- **CPU**: 8+ cores recommended (container loading is extremely CPU-intensive)
+- **Storage**: NVMe SSD required, additional 100-200GB for container runtime
+- **Startup Time**: 15-30+ minutes to load the 184GB image (verified with 384GB RAM)
+
 ```bash
-# Interactive shell
+# Interactive shell (be patient during startup)
 docker run -it vyges-vivado
 
 # Mount current directory
@@ -719,6 +735,181 @@ docker run -it -v $(pwd):/workspace vyges-vivado
 
 # Run specific command
 docker run -it vyges-vivado vivado -version
+
+# Run with resource limits (recommended for large images)
+docker run -it --memory=32g --cpus=8 vyges-vivado
+
+# Run in background with resource monitoring
+docker run -d --name vivado-container --memory=32g --cpus=8 vyges-vivado tail -f /dev/null
+```
+
+## Container Runtime Performance
+
+### **Large Image Considerations**
+
+The 184GB container image presents unique challenges for runtime performance:
+
+#### **Memory Usage**
+- **Image Loading**: Container runtime loads 184GB image layers into memory
+- **Vivado Runtime**: Vivado itself requires 8-16GB RAM for typical operations
+- **Total RAM Usage**: 64GB+ RAM required for smooth operation (verified with 384GB system)
+- **Memory Pressure**: Monitor with `free -h` and `docker stats` - expect high usage during startup
+
+#### **CPU Usage**
+- **Startup Time**: 15-30+ minutes to initialize the 184GB container (even with high-end hardware)
+- **Vivado Operations**: CPU-intensive synthesis and simulation
+- **Recommended**: 8+ CPU cores for responsive performance
+- **Monitoring**: Use `htop` or `docker stats` to monitor CPU usage - expect sustained high CPU during startup
+
+#### **Storage I/O**
+- **Container Layers**: 184GB of data requires massive I/O operations
+- **Temporary Files**: Vivado creates large temporary files during operation
+- **NVMe SSD Required**: HDD will cause severe performance degradation (hours to load)
+- **Available Space**: Ensure 100-200GB free space for container operations
+
+### **Performance Optimization**
+
+#### **Resource Limits**
+```bash
+# Set memory and CPU limits (realistic for 184GB image)
+docker run -it --memory=32g --cpus=8 --name vivado-dev vyges-vivado
+
+# Monitor resource usage
+docker stats vivado-dev
+
+# Check container resource limits
+docker inspect vivado-dev | grep -A 10 "Resources"
+```
+
+#### **Storage Optimization**
+```bash
+# Use tmpfs for temporary files (faster I/O)
+docker run -it --tmpfs /tmp --tmpfs /var/tmp vyges-vivado
+
+# Mount SSD storage for better performance
+docker run -it -v /fast-storage:/workspace vyges-vivado
+
+# Use overlay2 storage driver (default, but verify)
+docker info | grep "Storage Driver"
+```
+
+#### **Memory Management**
+```bash
+# Pre-allocate memory for better performance (realistic for 184GB image)
+docker run -it --memory=32g --memory-swap=32g vyges-vivado
+
+# Monitor memory usage
+docker exec vivado-container free -h
+docker exec vivado-container cat /proc/meminfo
+```
+
+### **Container Lifecycle Management**
+
+#### **Long-running Containers**
+```bash
+# Start container in background (realistic resource allocation)
+docker run -d --name vivado-dev --memory=32g --cpus=8 vyges-vivado tail -f /dev/null
+
+# Attach to running container
+docker exec -it vivado-dev bash
+
+# Stop and remove when done
+docker stop vivado-dev
+docker rm vivado-dev
+```
+
+#### **Container Persistence**
+```bash
+# Create persistent workspace
+docker run -it --name vivado-dev -v $(pwd):/workspace vyges-vivado
+
+# Commit changes to new image
+docker commit vivado-dev my-vivado-custom
+
+# Save custom image
+docker save my-vivado-custom -o my-vivado-custom.tar
+```
+
+### **Realistic Performance Expectations**
+
+**Based on Real-World Testing (384GB RAM, High-End Hardware):**
+- **Container Startup**: 15-30+ minutes (even with 384GB RAM)
+- **Memory Usage**: 3-4GB+ during loading process (podman process)
+- **CPU Usage**: Sustained 30-40% CPU during startup
+- **Storage I/O**: Massive I/O operations during image loading
+- **Patience Required**: This is normal for a 184GB container image
+
+### **Performance Monitoring**
+
+#### **Real-time Monitoring**
+```bash
+# Monitor container resources
+docker stats --no-stream
+
+# Monitor specific container
+docker stats vivado-dev
+
+# Monitor system resources
+htop
+iotop
+
+# Monitor podman process specifically
+ps aux | grep podman
+top -p $(pgrep podman)
+```
+
+#### **Performance Metrics**
+```bash
+# Check container startup time
+time docker run --rm vyges-vivado echo "startup test"
+
+# Check Vivado startup time
+time docker run --rm vyges-vivado /tools/Xilinx/2025.1/Vivado/bin/vivado -version
+
+# Monitor disk I/O during operations
+iostat -x 1
+```
+
+### **Troubleshooting Performance Issues**
+
+#### **Slow Container Startup**
+```bash
+# Check if image is fully loaded
+docker images | grep vyges-vivado
+
+# Verify container runtime performance
+docker system df
+docker system events
+
+# Check for resource constraints
+ulimit -a
+free -h
+```
+
+#### **High Memory Usage**
+```bash
+# Monitor memory usage
+docker stats --no-stream
+free -h
+
+# Check for memory leaks
+docker exec vivado-container ps aux --sort=-%mem
+
+# Restart container if needed
+docker restart vivado-dev
+```
+
+#### **High CPU Usage**
+```bash
+# Monitor CPU usage
+htop
+docker stats --no-stream
+
+# Check for CPU-intensive processes
+docker exec vivado-container top -o %CPU
+
+# Limit CPU usage if needed
+docker update --cpus=2 vivado-dev
 ```
 
 ## Health Monitoring
