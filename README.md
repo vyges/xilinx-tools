@@ -71,27 +71,38 @@ This **GitHub template repository** provides a complete Docker configuration for
 
 ### **Prerequisites**
 
-- Docker installed and running
+- Docker or Podman installed and running
 - Access to Xilinx Vivado installer files
 - `wget` command available (for download script)
 - **Minimum 300GB free disk space** (see Disk Space Requirements below)
 - **Server machine that does not sleep or suspend** (required for 3.5+ hour builds)
+- **Proper system limits configured** (see System Limits section below)
 
-### **Docker Version Requirements**
-- **Minimum**: Docker 20.10+ (for basic functionality)
-- **Recommended**: Docker 24.0+ (for best performance and features)
-- **Current**: ✅ Docker 28.3.3 with Buildx v0.26.1 - **Excellent!**
+### **Container Runtime Requirements**
+- **Docker**: Minimum 20.10+, Recommended 24.0+, Current 28.3.3 with Buildx v0.26.1
+- **Podman**: Minimum 4.0+, Recommended 4.9+ (✅ Successfully tested with Podman 4.9.3)
+- **Current**: ✅ Podman 4.9.3 - **Excellent!**
 
-**Your Docker Version Benefits:**
-- **Latest Features**: Docker 28.3.3 (2024) with all modern capabilities
-- **Buildx Support**: Advanced multi-platform and parallel builds
+**Your Container Runtime Benefits:**
+- **Podman 4.9.3**: Latest features with rootless containers and Docker compatibility
+- **Docker Compatibility**: Podman can run Docker commands seamlessly
 - **Performance**: Optimized layer caching and resource management
-- **Security**: Latest security patches and features
+- **Security**: Enhanced security with rootless containers
 - **Ubuntu 24.04**: Full compatibility and optimization
 
-### **Upgrading Docker on Ubuntu 24.04**
+### **Installing Container Runtime on Ubuntu 24.04**
 
-#### **Option 1: Install Latest Docker (Recommended)**
+#### **Option 1: Install Podman (Recommended)**
+```bash
+# Install Podman from Ubuntu repositories
+sudo apt update
+sudo apt install podman
+
+# Verify installation
+podman --version
+```
+
+#### **Option 2: Install Latest Docker**
 ```bash
 # Remove old Docker (if installed via apt)
 sudo apt remove docker docker-engine docker.io containerd runc
@@ -131,6 +142,141 @@ sudo snap install docker
 docker --version
 ```
 
+#### **Podman vs Docker Commands**
+All examples in this README use `docker` commands, but they work identically with `podman`:
+```bash
+# These commands are equivalent:
+docker build -t vyges-vivado .
+podman build -t vyges-vivado .
+
+docker run --rm vyges-vivado echo "test"
+podman run --rm vyges-vivado echo "test"
+```
+
+## System Limits and Optimization
+
+### **Critical System Limits**
+
+The build process requires proper system limits to handle large files and operations. The build script automatically optimizes these, but you can pre-configure them:
+
+#### **Open Files Limit (Critical)**
+```bash
+# Check current limit
+ulimit -n
+
+# Set recommended limit (build script will do this automatically)
+ulimit -n 65536
+
+# Make permanent in ~/.bashrc or /etc/security/limits.conf
+echo "ulimit -n 65536" >> ~/.bashrc
+```
+
+#### **File Size Limit**
+```bash
+# Check current limit
+ulimit -f
+
+# Set to unlimited (recommended for large builds)
+ulimit -f unlimited
+
+# Make permanent
+echo "ulimit -f unlimited" >> ~/.bashrc
+```
+
+#### **Memory Limits**
+```bash
+# Check current limits
+ulimit -a
+
+# Set memory limits (adjust based on your system)
+ulimit -v unlimited  # Virtual memory
+ulimit -m unlimited  # Physical memory
+```
+
+### **System Optimization**
+
+The build script automatically performs these optimizations:
+
+#### **Automatic Optimizations**
+- **Open Files**: Sets limit to 65,536 (required for large file operations)
+- **File Size**: Checks and warns if limit is too low
+- **Memory Management**: Monitors memory usage during build
+- **Cache Management**: Optimizes container build cache
+- **Resource Monitoring**: Real-time monitoring of CPU, memory, and disk usage
+
+#### **Manual System Tuning (Optional)**
+```bash
+# Increase shared memory limits (for large builds)
+echo "kernel.shmmax = 68719476736" >> /etc/sysctl.conf
+echo "kernel.shmall = 4294967296" >> /etc/sysctl.conf
+sysctl -p
+
+# Optimize memory management
+echo "vm.swappiness = 10" >> /etc/sysctl.conf
+echo "vm.dirty_ratio = 15" >> /etc/sysctl.conf
+echo "vm.dirty_background_ratio = 5" >> /etc/sysctl.conf
+sysctl -p
+```
+
+### **Build Script System Monitoring**
+
+The build script includes comprehensive system monitoring:
+
+#### **Real-time Monitoring**
+```bash
+# Monitor build progress (in another terminal)
+./build.sh --progress
+
+# Monitor system resources (in another terminal)
+./build.sh --monitor
+```
+
+#### **System Information Logged**
+- **Machine Information**: Hostname, OS, kernel, architecture
+- **CPU Details**: Model, cores, speed
+- **Memory**: Total and available RAM
+- **Storage**: Disk space and inode usage
+- **Container Runtime**: Version and capabilities
+- **System Limits**: All ulimit values
+- **File System**: Mount points and permissions
+
+#### **Build Time Estimation**
+The script provides intelligent build time estimation based on:
+- **CPU Cores**: Parallel processing capability
+- **RAM**: Memory pressure and swapping risk
+- **Storage**: I/O performance and available space
+- **Container Runtime**: Docker vs Podman performance characteristics
+
+### **Troubleshooting System Limits**
+
+#### **Common Issues**
+```bash
+# "Too many open files" error
+ulimit -n 65536
+
+# "File too large" error
+ulimit -f unlimited
+
+# "Out of memory" during build
+# Check available RAM and consider increasing swap
+free -h
+swapon --show
+```
+
+#### **Verification Commands**
+```bash
+# Check all current limits
+ulimit -a
+
+# Check system-wide limits
+cat /proc/sys/fs/file-max
+cat /proc/sys/kernel/shmmax
+
+# Check available resources
+free -h
+df -h
+```
+
 ## Disk Space Requirements
 
 ### **Build Process Space Usage**
@@ -150,7 +296,7 @@ The Docker build process requires significant disk space due to multiple stages:
 ### **Space Recovery After Build**
 - **Vivado Installer**: Can be deleted after successful build
 - **Docker Build Cache**: Can be cleaned with `docker system prune`
-- **Final Image Size**: ~120-150GB (usable for running containers)
+- **Final Image Size**: ~184GB (verified with successful build)
 
 ### **Space Optimization Tips**
 - Use `--no-cache` flag for clean builds
@@ -242,7 +388,7 @@ Download the Xilinx Vivado installer manually from the [Xilinx website](https://
 # Make script executable (first time only)
 chmod +x build.sh
 
-# Standard build with caching
+# Standard build with caching (includes automatic system optimization)
 ./build.sh
 
 # Clean build (no cache)
@@ -257,6 +403,14 @@ chmod +x build.sh
 # Show all options
 ./build.sh -h
 ```
+
+**Build Script Features:**
+- **Automatic System Optimization**: Sets ulimit -n to 65,536, checks file size limits
+- **Real-time Monitoring**: Monitors CPU, memory, disk usage during build
+- **Build Time Estimation**: Intelligent estimation based on your system specs
+- **Progress Tracking**: Detailed logging and progress monitoring
+- **Error Handling**: Comprehensive error detection and recovery
+- **Resource Monitoring**: Background monitoring with `./build.sh --monitor`
 
 #### **Option B: Manual Build Commands**
 ```bash
@@ -282,7 +436,7 @@ docker build --no-cache -t vyges-vivado . > build.log 2>&1
 docker build --no-cache -t vyges-vivado . 2>&1 | tee "build-$(date +%Y%m%d-%H%M%S).log"
 ```
 
-**Build Time**: Expect **3.5-4.5 hours** for complete builds depending on your system and network speed.
+**Build Time**: Expect **3.5-6 hours** for complete builds depending on your system and network speed. **Verified**: 5h49m for successful build on Ubuntu 24.04 with Podman 4.9.3.
 
 **⚠️ Logging Recommendation**: For long builds, always use log redirection to preserve build output in case of connection issues.
 
@@ -302,23 +456,23 @@ docker build --no-cache -t vyges-vivado .
 ```
 
 **Expected Time Savings:**
-- **First Build**: 3.5-4.5 hours (full build)
-- **Subsequent Builds**: 2-3 hours (cached layers)
+- **First Build**: 3.5-6 hours (full build) - **Verified**: 5h49m
+- **Subsequent Builds**: 2-4 hours (cached layers)
 - **Base Image Cached**: 2-3 minutes saved
 - **Package Layer Cached**: 5-10 minutes saved
 - **Installer Layer Cached**: 30-60 minutes saved (120GB file copy)
 
-**Docker 28.3.3 + Buildx Benefits:**
+**Podman 4.9.3 + BuildKit Benefits:**
 - **Parallel Layer Building**: Multiple layers build simultaneously
 - **Advanced Caching**: Better cache hit rates and management
 - **Resource Optimization**: Improved memory and disk usage
-- **Buildx Features**: Multi-platform builds and advanced caching
+- **Docker Compatibility**: Seamless Docker command compatibility
 - **Modern BuildKit**: Latest build engine with optimizations
 
 ## Build Logging and Monitoring
 
-### **Enhanced Build Commands for Docker 28.3.3**
-With your new Docker version, you can use these advanced build commands:
+### **Enhanced Build Commands for Podman 4.9.3**
+With Podman, you can use these advanced build commands (Docker commands work identically):
 
 #### **Standard Build (Recommended for most users)**
 ```bash
@@ -683,6 +837,10 @@ The Docker image applies patches to fix known issues:
   - Clean Docker cache: `docker system prune -a`
 - Verify all required files are present
 - Check Docker logs for specific error messages
+- **System Limits Issues**: Use the automated build script for automatic optimization
+  - Run `./build.sh` instead of manual `docker build` commands
+  - The script automatically sets `ulimit -n 65536` and other optimizations
+  - Check system limits: `ulimit -a`
 - **Disk Space Errors**: Common causes include:
   - Insufficient space for Vivado installer extraction
   - Docker build cache consuming too much space
@@ -735,7 +893,10 @@ For issues or questions:
 
 **Maintained by**: [Vyges Team](https://github.com/vyges)  
 **Last Updated**: August 2025  
-**Vivado Version**: 2025.1
+**Vivado Version**: 2025.1  
+**Build Status**: ✅ **Successfully Verified** (August 31, 2025)  
+**Tested With**: Podman 4.9.3 on Ubuntu 24.04 LTS  
+**Build Time**: 5h49m (184GB final image)
 
 ## 🐳 **Docker Management Help**
 
