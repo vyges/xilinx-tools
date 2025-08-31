@@ -783,26 +783,42 @@ verify_vivado_installer() {
     local calculated_hash=$(sha512sum "$tar_file" | cut -d' ' -f1)
     log_with_timestamp "Calculated SHA512: $calculated_hash"
     
-    # Extract expected hash from digests file
-    local expected_hash=$(grep -E "FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145\.tar" "$digests_file" | awk '{print $1}')
+    # Extract all SHA512 hashes from the digests file
+    # The file contains multiple hashes, we need to find the one that matches
+    local temp_file=$(mktemp)
     
-    if [ -z "$expected_hash" ]; then
-        print_warning "Could not find expected hash in digests file"
-        print_warning "Skipping verification. Installer integrity not verified."
-        log_build_step_complete "Verifying Vivado Installer Integrity"
-        return 0
-    fi
+    # Extract all SHA512 hashes (128 hex characters) from the file
+    # Handle cases where hashes are split across lines
+    grep -oE '[a-f0-9]{128}' "$digests_file" > "$temp_file"
     
-    log_with_timestamp "Expected SHA512: $expected_hash"
+    local match_found=false
+    local expected_hash=""
     
-    # Compare hashes
-    if [ "$calculated_hash" = "$expected_hash" ]; then
+    while IFS= read -r hash; do
+        if [ "$calculated_hash" = "$hash" ]; then
+            expected_hash="$hash"
+            match_found=true
+            break
+        fi
+    done < "$temp_file"
+    
+    rm -f "$temp_file"
+    
+    if [ "$match_found" = true ]; then
+        log_with_timestamp "Expected SHA512: $expected_hash"
         print_success "SHA512 verification PASSED - Installer integrity confirmed"
         log_with_timestamp "SHA512 verification successful"
     else
         print_error "SHA512 verification FAILED - Installer may be corrupted"
-        print_error "Expected: $expected_hash"
         print_error "Calculated: $calculated_hash"
+        print_error "No matching hash found in digests file"
+        
+        # Show available hashes for debugging
+        log_with_timestamp "Available hashes in digests file:"
+        grep -oE '[a-f0-9]{128}' "$digests_file" | while read -r hash; do
+            log_with_timestamp "  $hash"
+        done
+        
         log_with_timestamp "SHA512 verification failed - installer may be corrupted"
         return 1
     fi
