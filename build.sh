@@ -9,8 +9,11 @@ set -e
 IMAGE_NAME="vyges-vivado"
 BASE_IMAGE="ubuntu:24.04"
 BUILDER_NAME="vyges-builder"
-CACHE_DIR="$HOME/.docker/buildx-cache"
+CACHE_DIR="$HOME/.container-cache"
 LOG_FILE="logs/build-$(date +%Y%m%d-%H%M%S).log"
+
+# Container runtime (docker or podman)
+CONTAINER_RUNTIME="podman"
 
 # Colors for output
 RED='\033[0;31m'
@@ -33,8 +36,40 @@ get_machine_info() {
     echo "Total RAM: $(free -h | grep '^Mem:' | awk '{print $2}')"
     echo "Available RAM: $(free -h | grep '^Mem:' | awk '{print $7}')"
     echo "Storage: $(df -h / | tail -1 | awk '{print $2 " total, " $3 " used, " $4 " available"}')"
-    echo "Docker Version: $(docker --version)"
-    echo "Buildx Version: $(docker buildx version 2>/dev/null | head -1 || echo 'Not available')"
+    echo "Container Runtime: $CONTAINER_RUNTIME"
+    echo "Runtime Version: $($CONTAINER_RUNTIME --version)"
+    if [ "$CONTAINER_RUNTIME" = "docker" ]; then
+        echo "Buildx Version: $(docker buildx version 2>/dev/null | head -1 || echo 'Not available')"
+    fi
+    echo "========================================"
+}
+
+# Function to get system limits and configuration
+get_system_limits() {
+    echo "=== SYSTEM LIMITS & CONFIGURATION ==="
+    echo "User Limits (ulimit -a):"
+    ulimit -a | sed 's/^/  /'
+    echo ""
+    echo "File System Limits:"
+    echo "  Max open files: $(cat /proc/sys/fs/file-max)"
+    echo "  Current open files: $(cat /proc/sys/fs/file-nr | awk '{print $1}')"
+    echo "  Max inodes: $(df -i / | tail -1 | awk '{print $2}')"
+    echo "  Used inodes: $(df -i / | tail -1 | awk '{print $3}')"
+    echo "  Inode usage: $(df -i / | tail -1 | awk '{print $5}')"
+    echo ""
+    echo "Memory Management:"
+    echo "  Swappiness: $(cat /proc/sys/vm/swappiness)"
+    echo "  Dirty ratio: $(cat /proc/sys/vm/dirty_ratio)"
+    echo "  Dirty background ratio: $(cat /proc/sys/vm/dirty_background_ratio)"
+    echo ""
+    echo "Shared Memory:"
+    echo "  SHMMAX: $(cat /proc/sys/kernel/shmmax)"
+    echo "  SHMMNI: $(cat /proc/sys/kernel/shmmni)"
+    echo "  SHMALL: $(cat /proc/sys/kernel/shmall)"
+    echo ""
+    echo "Temporary Directory:"
+    echo "  /tmp size: $(df -h /tmp | tail -1 | awk '{print $2 " total, " $3 " used, " $4 " available"}')"
+    echo "  /tmp inodes: $(df -i /tmp | tail -1 | awk '{print $2 " total, " $3 " used, " $4 " available"}')"
     echo "========================================"
 }
 
@@ -76,26 +111,26 @@ estimate_build_time() {
     local ram_gb=$(free -g | grep '^Mem:' | awk '{print $2}')
     local storage_gb=$(df -BG / | tail -1 | awk '{print $4}' | sed 's/G//')
     
-    echo "=== DOCKER BUILD TIME ESTIMATION ==="
+    echo "=== CONTAINER RUNTIME BUILD TIME ESTIMATION ==="
     echo "Based on your system specifications:"
     echo "- CPU Cores: $cpu_cores"
     echo "- RAM: ${ram_gb}GB"
     echo "- Available Storage: ${storage_gb}GB"
     echo ""
     
-    # Docker build time estimation (more realistic)
-    echo "=== DOCKER BUILD BREAKDOWN ==="
+    # Container runtime build time estimation (more realistic)
+    echo "=== CONTAINER RUNTIME BUILD BREAKDOWN ==="
     
-    # Base Docker build times for Vivado (in minutes)
+    # Base Container runtime build times for Vivado (in minutes)
     local base_vivado_time=45      # Vivado installation
-    local base_docker_time=120     # Docker layer processing
+    local base_docker_time=120     # Container runtime layer processing
     local base_cache_time=30       # Cache operations
     local base_finalize_time=45    # Image finalization
     
     local total_base_minutes=$((base_vivado_time + base_docker_time + base_cache_time + base_finalize_time))
     
     echo "- Base Vivado installation: ${base_vivado_time} minutes"
-    echo "- Docker layer processing: ${base_docker_time} minutes"
+    echo "- Container runtime layer processing: ${base_docker_time} minutes"
     echo "- Cache operations: ${base_cache_time} minutes"
     echo "- Image finalization: ${base_finalize_time} minutes"
     echo "- Total base time: ${total_base_minutes} minutes"
@@ -104,7 +139,7 @@ estimate_build_time() {
     # System-specific adjustments
     echo "=== SYSTEM OPTIMIZATIONS ==="
     
-    # CPU adjustments (Docker builds are I/O bound, but CPU helps with parallel operations)
+    # CPU adjustments (Container runtime builds are I/O bound, but CPU helps with parallel operations)
     local cpu_factor=1.0
     if [ "$cpu_cores" -ge 64 ]; then
         cpu_factor=0.85
@@ -142,7 +177,7 @@ estimate_build_time() {
         echo "- Low RAM (${ram_gb}GB): ~25% slower (likely swapping, consider increasing)"
     fi
     
-    # Storage adjustments (I/O performance is critical for Docker builds)
+    # Storage adjustments (I/O performance is critical for Container runtime builds)
     local storage_factor=1.0
     if [ "$storage_gb" -ge 1000 ]; then
         storage_factor=0.90
@@ -161,27 +196,32 @@ estimate_build_time() {
         echo "- Very low storage (${storage_gb}GB): ~30% slower (severe I/O bottlenecks)"
     fi
     
-    # Docker-specific factors
-    local docker_factor=1.0
-    if command -v docker > /dev/null 2>&1; then
-        local docker_version=$(docker --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
-        if [ ! -z "$docker_version" ]; then
-            local major_version=$(echo "$docker_version" | cut -d. -f1)
-            if [ "$major_version" -ge 25 ]; then
-                docker_factor=0.95
-                echo "- Modern Docker (${docker_version}): ~5% faster (improved build performance)"
-            elif [ "$major_version" -ge 20 ]; then
-                docker_factor=1.0
-                echo "- Recent Docker (${docker_version}): normal build speed"
-            else
-                docker_factor=1.10
-                echo "- Older Docker (${docker_version}): ~10% slower (consider upgrading)"
+    # Container runtime-specific factors
+    local runtime_factor=1.0
+    if command -v "$CONTAINER_RUNTIME" > /dev/null 2>&1; then
+        local runtime_version=$($CONTAINER_RUNTIME --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [ ! -z "$runtime_version" ]; then
+            if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+                runtime_factor=0.90
+                echo "- Podman (${runtime_version}): ~10% faster (better resource management)"
+            elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
+                local major_version=$(echo "$runtime_version" | cut -d. -f1)
+                if [ "$major_version" -ge 25 ]; then
+                    runtime_factor=0.95
+                    echo "- Modern Docker (${runtime_version}): ~5% faster (improved build performance)"
+                elif [ "$major_version" -ge 20 ]; then
+                    runtime_factor=1.0
+                    echo "- Recent Docker (${runtime_version}): normal build speed"
+                else
+                    runtime_factor=1.10
+                    echo "- Older Docker (${runtime_version}): ~10% slower (consider upgrading)"
+                fi
             fi
         fi
     fi
     
     # Calculate final estimated time
-    local estimated_minutes=$(echo "$total_base_minutes * $cpu_factor * $ram_factor * $storage_factor * $docker_factor" | bc -l)
+    local estimated_minutes=$(echo "$total_base_minutes * $cpu_factor * $ram_factor * $storage_factor * $runtime_factor" | bc -l)
     local estimated_hours=$(echo "scale=1; $estimated_minutes / 60" | bc -l)
     local estimated_hours_rounded=$(echo "scale=0; $estimated_minutes / 60 + 0.5" | bc -l)
     
@@ -235,8 +275,8 @@ show_resource_monitoring() {
         local memory=$(free -h | grep '^Mem:' | awk '{print $3 "/" $2 " (" $3/$2*100 "%)"}')
         local disk=$(df -h / | tail -1 | awk '{print $3 "/" $2 " (" $3/$2*100 "%)"}')
         local cache_size=$(du -sh "$CACHE_DIR" 2>/dev/null || echo '0B')
-        local docker_images=$(docker images --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}" | wc -l)
-        local docker_containers=$(docker ps -a --format "table {{.Names}}\t{{.Status}}" | wc -l)
+        local container_images=$($CONTAINER_RUNTIME images --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}" | wc -l)
+        local container_containers=$($CONTAINER_RUNTIME ps -a --format "table {{.Names}}\t{{.Status}}" | wc -l)
         
         clear
         echo "Real-time Resource Monitoring - $timestamp"
@@ -244,8 +284,8 @@ show_resource_monitoring() {
         echo "Memory Usage: $memory"
         echo "Disk Usage:   $disk"
         echo "Cache Size:   $cache_size"
-        echo "Docker Images: $((docker_images - 1))"
-        echo "Docker Containers: $((docker_containers - 1))"
+        echo "Container Images: $((container_images - 1))"
+        echo "Container Containers: $((container_containers - 1))"
         echo ""
         echo "Press Ctrl+C to stop monitoring"
         
@@ -300,7 +340,7 @@ show_usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Build Vyges Vivado Docker image with optimization and caching.
+Build Vyges Vivado container image with optimization and caching.
 
 OPTIONS:
     -c, --clean          Clean build (no cache)
@@ -309,6 +349,7 @@ OPTIONS:
     -i, --image NAME     Custom image name (default: vyges-vivado)
     -l, --log FILE       Custom log file (default: build-YYYYMMDD-HHMMSS.log)
     -s, --no-save        Skip automatic image export
+    --skip-verify        Skip SHA512 verification of Vivado installer
     -h, --help           Show this help message
     --progress           Show current build progress (use in another terminal)
     --monitor            Show real-time resource monitoring
@@ -344,6 +385,7 @@ EOF
 CLEAN_BUILD=false
 FORCE_PULL=false
 SKIP_SAVE=false
+SKIP_VERIFY=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         -c|--clean)
@@ -370,6 +412,10 @@ while [[ $# -gt 0 ]]; do
             SKIP_SAVE=true
             shift
             ;;
+        --skip-verify)
+            SKIP_VERIFY=true
+            shift
+            ;;
         -h|--help)
             show_usage
             exit 0
@@ -390,39 +436,83 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Function to optimize system limits
+optimize_system_limits() {
+    log_build_step "Optimizing System Limits"
+    
+    # Check and fix open files limit
+    local current_limit=$(ulimit -n)
+    local recommended_limit=65536
+    
+    if [ "$current_limit" -lt "$recommended_limit" ]; then
+        log_with_timestamp "Current open files limit: $current_limit (too low)"
+        log_with_timestamp "Setting open files limit to: $recommended_limit"
+        
+        if ulimit -n "$recommended_limit" 2>/dev/null; then
+            log_with_timestamp "Successfully set open files limit to: $(ulimit -n)"
+            print_success "Open files limit optimized"
+        else
+            print_warning "Could not set open files limit. Build may fail with large files."
+            print_warning "Consider running: ulimit -n $recommended_limit"
+        fi
+    else
+        log_with_timestamp "Open files limit is adequate: $current_limit"
+    fi
+    
+    # Check and warn about other critical limits
+    local file_size_limit=$(ulimit -f)
+    if [ "$file_size_limit" != "unlimited" ] && [ "$file_size_limit" -lt 100000000 ]; then
+        print_warning "File size limit may be too low: $file_size_limit blocks"
+        print_warning "Consider setting: ulimit -f unlimited"
+    fi
+    
+    log_build_step_complete "Optimizing System Limits"
+}
+
 # Function to check prerequisites
 check_prerequisites() {
     log_build_step "Checking Prerequisites"
     
-    # Check if Docker is available and working
-    if ! command -v docker > /dev/null 2>&1; then
-        print_error "Docker command not found. Please install Docker and try again."
+    # Check if container runtime is available and working
+    if ! command -v "$CONTAINER_RUNTIME" > /dev/null 2>&1; then
+        print_error "$CONTAINER_RUNTIME command not found. Please install $CONTAINER_RUNTIME and try again."
         exit 1
     fi
     
-    log_with_timestamp "Docker command found at: $(which docker)"
+    log_with_timestamp "Container runtime command found at: $(which $CONTAINER_RUNTIME)"
     
-    # Check if Docker daemon is accessible
-    log_with_timestamp "Testing Docker daemon connection..."
-    if ! docker info > /dev/null 2>&1; then
-        print_error "Cannot connect to Docker daemon. Please check:"
-        print_error "1. Docker service is running: sudo systemctl status docker"
-        print_error "2. User has Docker permissions: sudo usermod -aG docker $USER"
-        print_error "3. Docker socket permissions: ls -la /var/run/docker.sock"
+    # Check if container runtime is accessible
+    log_with_timestamp "Testing $CONTAINER_RUNTIME connection..."
+    if ! $CONTAINER_RUNTIME info > /dev/null 2>&1; then
+        if [ "$CONTAINER_RUNTIME" = "docker" ]; then
+            print_error "Cannot connect to Docker daemon. Please check:"
+            print_error "1. Docker service is running: sudo systemctl status docker"
+            print_error "2. User has Docker permissions: sudo usermod -aG docker $USER"
+            print_error "3. Docker socket permissions: ls -la /var/run/docker.sock"
+        else
+            print_error "Cannot connect to Podman. Please check:"
+            print_error "1. Podman is properly installed"
+            print_error "2. User has necessary permissions"
+        fi
         exit 1
     fi
     
-    # Check Docker version
-    DOCKER_VERSION=$(docker --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    log_with_timestamp "Docker version: $DOCKER_VERSION"
+    # Check container runtime version
+    RUNTIME_VERSION=$($CONTAINER_RUNTIME --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    log_with_timestamp "$CONTAINER_RUNTIME version: $RUNTIME_VERSION"
     
-    # Check if buildx is available
-    if ! docker buildx version > /dev/null 2>&1; then
-        log_with_timestamp "Buildx not available. Using standard docker build."
-        USE_BUILDX=false
+    # Check if buildx is available (Docker only)
+    if [ "$CONTAINER_RUNTIME" = "docker" ]; then
+        if ! docker buildx version > /dev/null 2>&1; then
+            log_with_timestamp "Buildx not available. Using standard docker build."
+            USE_BUILDX=false
+        else
+            log_with_timestamp "Buildx available: $(docker buildx version | head -1)"
+            USE_BUILDX=true
+        fi
     else
-        log_with_timestamp "Buildx available: $(docker buildx version | head -1)"
-        USE_BUILDX=true
+        log_with_timestamp "Using Podman build (no buildx needed)"
+        USE_BUILDX=false
     fi
     
     # Check if vivado-installer directory exists
@@ -446,32 +536,38 @@ check_base_image() {
     
     if [ "$FORCE_PULL" = true ]; then
         log_with_timestamp "Force pulling base image..."
-        docker pull "$BASE_IMAGE"
+        $CONTAINER_RUNTIME pull "$BASE_IMAGE"
         log_with_timestamp "Base image pulled successfully"
         log_build_step_complete "Checking Base Image"
         return
     fi
     
-    if docker images "$BASE_IMAGE" | grep -q "$BASE_IMAGE"; then
+    if $CONTAINER_RUNTIME images "$BASE_IMAGE" | grep -q "$BASE_IMAGE"; then
         log_with_timestamp "Base image already exists locally"
         log_with_timestamp "Image details:"
-        docker images "$BASE_IMAGE" | tee -a "$LOG_FILE"
+        $CONTAINER_RUNTIME images "$BASE_IMAGE" | tee -a "$LOG_FILE"
     else
         log_with_timestamp "Base image not found. Pulling..."
-        docker pull "$BASE_IMAGE"
+        $CONTAINER_RUNTIME pull "$BASE_IMAGE"
         log_with_timestamp "Base image pulled successfully"
     fi
     
     log_build_step_complete "Checking Base Image"
 }
 
-# Function to setup buildx builder
+# Function to setup buildx builder (Docker only)
 setup_builder() {
-    log_build_step "Setting Up Buildx Builder"
+    log_build_step "Setting Up Container Builder"
+    
+    if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+        log_with_timestamp "Using Podman (no buildx setup needed)"
+        log_build_step_complete "Setting Up Container Builder"
+        return
+    fi
     
     if [ "$USE_BUILDX" = false ]; then
         log_with_timestamp "Skipping buildx setup (not available)"
-        log_build_step_complete "Setting Up Buildx Builder"
+        log_build_step_complete "Setting Up Container Builder"
         return
     fi
     
@@ -532,7 +628,11 @@ build_image() {
     # Build command based on options
     if [ "$CLEAN_BUILD" = true ]; then
         log_with_timestamp "Clean build (no cache)"
-        if [ "$USE_BUILDX" = true ]; then
+        if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+            $CONTAINER_RUNTIME build --no-cache \
+                --format docker \
+                -t "$IMAGE_NAME" . 2>&1 | tee -a "$LOG_FILE"
+        elif [ "$USE_BUILDX" = true ]; then
             docker buildx build --no-cache \
                 --platform linux/amd64 \
                 --load \
@@ -543,8 +643,14 @@ build_image() {
         fi
     else
         log_with_timestamp "Build with caching"
-        if [ "$USE_BUILDX" = true ]; then
-            # Add verbose output for debugging
+        if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+            # Podman build with cache
+            log_with_timestamp "Starting Podman build with cache..."
+            $CONTAINER_RUNTIME build \
+                --format docker \
+                -t "$IMAGE_NAME" . 2>&1 | tee -a "$LOG_FILE"
+        elif [ "$USE_BUILDX" = true ]; then
+            # Docker buildx with cache
             log_with_timestamp "Starting buildx build with cache..."
             log_with_timestamp "Cache from: type=local,src=$CACHE_DIR"
             log_with_timestamp "Cache to: type=local,dest=$CACHE_DIR"
@@ -574,15 +680,15 @@ build_image() {
         
         # Show image details
         log_with_timestamp "Image details:"
-        docker images "$IMAGE_NAME" | tee -a "$LOG_FILE"
+        $CONTAINER_RUNTIME images "$IMAGE_NAME" | tee -a "$LOG_FILE"
         
         # Show image size
-        IMAGE_SIZE=$(docker images "$IMAGE_NAME" --format "table {{.Size}}" | tail -1)
+        IMAGE_SIZE=$($CONTAINER_RUNTIME images "$IMAGE_NAME" --format "table {{.Size}}" | tail -1)
         log_with_timestamp "Image size: $IMAGE_SIZE"
         
         # Test image
         log_with_timestamp "Testing image..."
-        if docker run --rm "$IMAGE_NAME" echo "Image test successful" > /dev/null 2>&1; then
+        if $CONTAINER_RUNTIME run --rm "$IMAGE_NAME" echo "Image test successful" > /dev/null 2>&1; then
             log_with_timestamp "Image test passed"
         else
             log_with_timestamp "Image test failed"
@@ -643,6 +749,68 @@ validate_cache() {
     return 0
 }
 
+# Function to verify Vivado installer integrity
+verify_vivado_installer() {
+    log_build_step "Verifying Vivado Installer Integrity"
+    
+    local installer_dir="vivado-installer"
+    local tar_file="${installer_dir}/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar"
+    local digests_file="${installer_dir}/FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145.tar.digests"
+    
+    # Check if files exist
+    if [ ! -f "$tar_file" ]; then
+        print_error "Vivado installer tar file not found: $tar_file"
+        return 1
+    fi
+    
+    if [ ! -f "$digests_file" ]; then
+        print_warning "Digests file not found: $digests_file"
+        print_warning "Skipping SHA512 verification. Installer integrity not verified."
+        log_build_step_complete "Verifying Vivado Installer Integrity"
+        return 0
+    fi
+    
+    log_with_timestamp "Verifying installer integrity using SHA512..."
+    log_with_timestamp "Tar file: $tar_file"
+    log_with_timestamp "Digests file: $digests_file"
+    
+    # Get file size for progress indication
+    local file_size=$(du -h "$tar_file" | cut -f1)
+    log_with_timestamp "File size: $file_size"
+    
+    # Calculate SHA512 hash
+    log_with_timestamp "Calculating SHA512 hash (this may take several minutes for large files)..."
+    local calculated_hash=$(sha512sum "$tar_file" | cut -d' ' -f1)
+    log_with_timestamp "Calculated SHA512: $calculated_hash"
+    
+    # Extract expected hash from digests file
+    local expected_hash=$(grep -E "FPGAs_AdaptiveSoCs_Unified_SDI_2025.1_0530_0145\.tar" "$digests_file" | awk '{print $1}')
+    
+    if [ -z "$expected_hash" ]; then
+        print_warning "Could not find expected hash in digests file"
+        print_warning "Skipping verification. Installer integrity not verified."
+        log_build_step_complete "Verifying Vivado Installer Integrity"
+        return 0
+    fi
+    
+    log_with_timestamp "Expected SHA512: $expected_hash"
+    
+    # Compare hashes
+    if [ "$calculated_hash" = "$expected_hash" ]; then
+        print_success "SHA512 verification PASSED - Installer integrity confirmed"
+        log_with_timestamp "SHA512 verification successful"
+    else
+        print_error "SHA512 verification FAILED - Installer may be corrupted"
+        print_error "Expected: $expected_hash"
+        print_error "Calculated: $calculated_hash"
+        log_with_timestamp "SHA512 verification failed - installer may be corrupted"
+        return 1
+    fi
+    
+    log_build_step_complete "Verifying Vivado Installer Integrity"
+    return 0
+}
+
 # Function to save Docker image
 save_docker_image() {
     log_build_step "Saving Docker Image"
@@ -657,7 +825,7 @@ save_docker_image() {
     log_with_timestamp "Saving image '$IMAGE_NAME' to: $export_filename"
     
     # Save the image
-    if docker save "$IMAGE_NAME" -o "$export_filename"; then
+    if $CONTAINER_RUNTIME save "$IMAGE_NAME" -o "$export_filename"; then
         # Get file size
         local file_size=$(du -h "$export_filename" | cut -f1)
         local file_size_bytes=$(stat -c%s "$export_filename")
@@ -713,6 +881,9 @@ main() {
     # Log machine information
     get_machine_info | tee -a "$LOG_FILE"
     
+    # Log system limits and configuration
+    get_system_limits | tee -a "$LOG_FILE"
+    
     # Estimate build time
     estimate_build_time | tee -a "$LOG_FILE"
     
@@ -734,7 +905,13 @@ main() {
     MONITOR_PID=$!
     
     # Execute build steps
+    optimize_system_limits
     check_prerequisites
+    if [ "$SKIP_VERIFY" = false ]; then
+        verify_vivado_installer
+    else
+        log_with_timestamp "Skipping SHA512 verification (--skip-verify flag used)"
+    fi
     check_base_image
     setup_builder
     build_image
@@ -763,7 +940,7 @@ main() {
     fi
     
     print_success "Build process completed successfully!"
-    print_status "You can now run: docker run -it $IMAGE_NAME"
+    print_status "You can now run: $CONTAINER_RUNTIME run -it $IMAGE_NAME"
     print_status "Build log saved to: $LOG_FILE"
 }
 
