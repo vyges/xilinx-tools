@@ -839,6 +839,54 @@ docker save my-vivado-custom -o my-vivado-custom.tar
 - **Storage I/O**: Massive I/O operations during image loading
 - **Patience Required**: This is normal for a 184GB container image
 
+### **Successful Container Verification**
+
+**When the container is working correctly, you should see:**
+```bash
+# Check environment variables
+podman run --rm localhost/vyges-vivado env | grep -i vivado
+
+# Expected output:
+XILINX_VIVADO=/tools/Xilinx/2025.1/Vivado
+PATH=/tools/Xilinx/2025.1/Vitis/bin:/tools/Xilinx/2025.1/Vivado/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+VIVADO_BASE_VERSION=2025.1
+VIVADO_VERSION=2025.1
+```
+
+**Additional verification commands:**
+```bash
+# Check Vivado installation
+podman run --rm localhost/vyges-vivado ls -la /tools/Xilinx/2025.1/Vivado/bin/
+
+# Test Vivado version
+podman run --rm localhost/vyges-vivado /tools/Xilinx/2025.1/Vivado/bin/vivado -version
+
+# Check Vitis installation
+podman run --rm localhost/vyges-vivado ls -la /tools/Xilinx/2025.1/Vitis/bin/
+```
+
+### **Quick Testing Commands**
+
+**Basic functionality tests:**
+```bash
+# Test container startup
+podman run --rm localhost/vyges-vivado echo "✅ Container works"
+
+# Check environment variables (should show Vivado paths)
+podman run --rm localhost/vyges-vivado env | grep -i vivado
+
+# Test Vivado version
+podman run --rm localhost/vyges-vivado /tools/Xilinx/2025.1/Vivado/bin/vivado -version | head -5
+
+# Count Vivado binaries
+podman run --rm localhost/vyges-vivado ls -la /tools/Xilinx/2025.1/Vivado/bin/ | wc -l
+```
+
+**Expected results when working correctly:**
+- Environment variables show proper Vivado paths
+- Vivado version command returns version information
+- Multiple Vivado binaries are available in the bin directory
+
 ### **Performance Monitoring**
 
 #### **Real-time Monitoring**
